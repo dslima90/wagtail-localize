@@ -7,7 +7,7 @@ jobs:
     steps:
       - checkout
       - run: pipenv install flake8
-      - run: pipenv install -e .[testing]
+      - run: pipenv install -e .[testing,git]
       - run: git clone git@github.com:kaedroho/wagtail.git -b internationalisation
       - run: pipenv install -e ./wagtail
       - run: cd wagtail && git status 
@@ -20,7 +20,7 @@ jobs:
     steps:
       - checkout
       - run: git clone git@github.com:kaedroho/wagtail.git -b internationalisation
-      - run: pipenv install -e .[testing] -e ./wagtail
+      - run: pipenv install -e .[testing,git] -e ./wagtail
       - run: pipenv run python testmanage.py test
 
 workflows:

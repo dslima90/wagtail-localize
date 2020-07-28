@@ -1,6 +1,8 @@
 import json
 import uuid
+from collections import defaultdict
 
+import polib
 from django.contrib.contenttypes.models import ContentType
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models, transaction
@@ -240,6 +242,12 @@ class TranslationSource(models.Model):
             else:
                 StringSegment.from_value(self, self.locale, segment)
 
+    def export_po(self):
+        """
+        Exports a PO file contining the source strings.
+        """
+        pass
+
     @transaction.atomic
     def create_or_update_translation(self, locale, user=None, publish=True, copy_parent_pages=False, string_translation_fallback_to_source=False):
         """
@@ -357,6 +365,29 @@ class TranslationSource(models.Model):
         return translation, created
 
 
+class POImportWarning:
+    """
+    Base class for warnings yielded from Translation.import_po.
+    """
+    pass
+
+
+class UnknownString(POImportWarning):
+    """
+    The PO file contains an unrecognised `msgid`
+    """
+    def __init__(self, string):
+        self.string = string
+
+
+class UnknownContext(POImportWarning):
+    """
+    The PO file contains an unrecognised `msgctxt`
+    """
+    def __init__(self, context):
+        self.context = context
+
+
 class Translation(models.Model):
     """
     Manages the translation of an object into a locale.
@@ -435,6 +466,55 @@ class Translation(models.Model):
             return _("Up to date")
         else:
             return _("Waiting for translations")
+
+    def export_po(self, include_obsolete_translations=True):
+        """
+        Exports a PO file contining the source strings and translations.
+
+        If include_obsolete_translations is True, this will add any translations
+        that were used in the past commented out at the bottom.
+        """
+        source_po = self.source.export_po()
+
+    def import_po(self, po):
+        """
+        Imports translations from a PO file.
+        """
+        for entry in po:
+            # Don't import blank strings
+            if not entry.msgstr:
+                continue
+
+            try:
+                string = String.objects.get(
+                    locale_id=self.source.locale_id, data=entry.msgid
+                )
+                string_translation, created = string.translations.get_or_create(
+                    locale_id=self.target_locale_id,
+                    context=TranslationContext.objects.get(
+                        object_id=translation.source.object_id, path=entry.msgctxt,
+                    )
+                    if entry.msgctxt
+                    else None,
+                    defaults={
+                        "data": entry.msgstr,
+                        "updated_at": timezone.now(),
+                    },
+                )
+
+                if not created:
+                    # Update the string_translation only if it has changed
+                    if string_translation.data != entry.msgstr:
+                        string_translation.data = entry.msgstr
+                        string_translation.updated_at = timezone.now()
+                        string_translation.save()
+
+            except TranslationContext.DoesNotExist:
+                yield UnknownContext(entry.msgctxt)
+
+            except String.DoesNotExist:
+                yield UnknownString(entry.msgid)
+
 
     def save_target(self, user=None, publish=True):
         """
