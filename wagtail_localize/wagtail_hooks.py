@@ -5,8 +5,10 @@ from django.contrib.admin.utils import quote
 from django.contrib.auth.models import Permission
 from django.urls import reverse
 from django.templatetags.static import static
+from django.urls import path
 from django.utils.html import format_html_join
 from django.utils.translation import gettext as _
+from django.views.i18n import JavaScriptCatalog
 
 from wagtail.admin import widgets as wagtailadmin_widgets
 from wagtail.core import hooks
@@ -14,7 +16,9 @@ from wagtail.core.models import TranslatableMixin
 from wagtail.snippets.widgets import SnippetListingButton
 
 from . import admin_views
+from .models import Translation
 from .views import submit_translations
+from .views.edit_translation import edit_translation
 
 
 @hooks.register("insert_editor_js")
@@ -33,6 +37,7 @@ def register_admin_urls():
         url(r"^translations_list/(\d+)/$", admin_views.translations_list_modal, name="translations_list_modal"),
         url(r"^submit/page/(\d+)/$", submit_translations.submit_page_translation, name="submit_page_translation"),
         url(r"^submit/snippet/(\w+)/(\w+)/(\d+)/$", submit_translations.submit_snippet_translation, name="submit_snippet_translation"),
+        path('jsi18n/', JavaScriptCatalog.as_view(packages=['wagtail_localize']), name='javascript_catalog'),
     ]
 
     return [
@@ -76,3 +81,26 @@ def register_snippet_listing_buttons(snippet, user, next_url=None):
             attrs={'aria-label': _("Translate '%(title)s'") % {'title': str(snippet)}},
             priority=100
         )
+
+
+@hooks.register("before_edit_page")
+def before_edit_page(request, page):
+    # Overrides the edit page view if the page is the target of a translation
+    try:
+        translation = Translation.objects.get(object_id=page.translation_key, target_locale_id=page.locale_id, enabled=True)
+        return edit_translation(request, translation, page)
+
+    except Translation.DoesNotExist:
+        pass
+
+
+@hooks.register("before_edit_snippet")
+def before_edit_page(request, instance):
+    # Overrides the edit snippet view if the snippet is translatable and the target of a translation
+    if isinstance(instance, TranslatableMixin):
+        try:
+            translation = Translation.objects.get(object_id=instance.translation_key, target_locale_id=instance.locale_id, enabled=True)
+            return edit_translation(request, translation, instance)
+
+        except Translation.DoesNotExist:
+            pass
