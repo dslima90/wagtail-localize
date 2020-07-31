@@ -15,6 +15,7 @@ from django.db.models import (
     Exists,
     OuterRef
 )
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext as _
@@ -389,6 +390,8 @@ class Translation(models.Model):
         - The total number of segments in the source that need to be translated
         - The number of segments that have been translated into the locale
         """
+        # TODO: Add a annotate_progress method to the queryset once https://code.djangoproject.com/ticket/28296 is supported
+
         # Get QuerySet of Segments that need to be translated
         required_segments = StringSegment.objects.filter(source_id=self.source_id)
 
@@ -411,9 +414,14 @@ class Translation(models.Model):
                 default=Value(0),
                 output_field=IntegerField(),
             )
-        ).aggregate(total_segments=Count("pk"), translated_segments=Sum("is_translated_i"))
+        ).aggregate(total_strings=Count("pk"), translated_strings=Sum("is_translated_i"))
 
-        return aggs["total_segments"], aggs["translated_segments"]
+        return aggs["total_strings"], aggs["translated_strings"]
+
+    def get_edit_url(self):
+        instance = self.source.get_translated_instance(self.target_locale)
+        if isinstance(instance, Page):
+            return reverse('wagtailadmin_pages:edit', args=[instance.id])
 
     def get_status_display(self):
         """

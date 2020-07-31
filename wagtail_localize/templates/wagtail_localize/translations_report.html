@@ -1,0 +1,17 @@
+{% extends "wagtailadmin/generic/edit.html" %}
+{% load i18n wagtailadmin_tags %}
+
+{% block titletag %}{% trans "Translation" %}{% endblock %}
+
+{% block content %}
+    <div class="js-translations-report" data-api-url="{% url 'wagtail_localize:api:translations' %}"></div>
+{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{% versioned_static 'wagtailadmin/css/layouts/report.css' %}" type="text/css" />
+{% endblock %}
+
+{% block extra_js %}
+    <script type="text/javascript" src="{% url 'wagtail_localize:javascript_catalog' %}"></script>
+    <script type="text/javascript" src="{% versioned_static 'wagtail_localize/js/wagtail-localize.js' %}"></script>
+{% endblock %}
