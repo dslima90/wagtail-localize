@@ -133,21 +133,35 @@ const Header: FunctionComponent<HeaderProps> = ({title, subtitle, icon, merged, 
         subtitleWrapped = <span>{subtitle}</span>;
     }
 
+    let actionsElement = <></>;
+    if (actions) {
+        actionsElement = (
+            <div className="right">
+                {actions}
+            </div>
+        );
+    }
+
+    let metaElement = <></>;
+    if (meta) {
+        metaElement = (
+            <ul className="row header-meta">
+                {meta}
+            </ul>
+        );
+    }
+
     return (
         <header className={classNames.join(" ")}>
         {/* TODO {% block breadcrumb %}{% endblock %}*/}
         <div className={rowClassNames.join(" ")}>
             <h1 className="left col header-title" style={{textTransform: 'none'}}> {/* TODO: Move style */}
-                {icon && <Icon name={icon} />}
+                {icon && <Icon name={icon} className="header-title-icon" />}
                 {title} {subtitleWrapped}
             </h1>
-            <div className="right">
-                {actions}
-            </div>
+            {actionsElement}
         </div>
-        <ul className="row header-meta">
-            {meta}
-        </ul>
+        {metaElement}
     </header>
     );
 };
