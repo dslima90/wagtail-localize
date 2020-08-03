@@ -36,6 +36,7 @@
     "webpack-cli": "^3.3.2"
   },
   "dependencies": {
+    "query-string": "^6.13.1",
     "react": "^16.8.6",
     "react-dom": "^16.8.6",
     "redux": "^4.0.1"
