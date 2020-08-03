@@ -4,8 +4,10 @@ from django.contrib import messages
 from django.contrib.admin.utils import quote, unquote
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, render, redirect
-from django.utils.translation import gettext as _
+from django.utils import timezone
+from django.utils.translation import gettext as _, gettext_lazy as __
 from wagtail.admin.views.pages import get_valid_next_url_from_request
 from wagtail.core.models import Page, Locale, TranslatableMixin
 from wagtail.snippets.views.snippets import get_snippet_model_from_url_params
@@ -14,31 +16,42 @@ from wagtail_localize.models import Translation, TranslationSource
 
 
 class SubmitTranslationForm(forms.Form):
-    locales = forms.ModelMultipleChoiceField(
-        queryset=Locale.objects.none(), widget=forms.CheckboxSelectMultiple
+    update_locales = forms.ModelMultipleChoiceField(
+        label=__("Update existing translations"),
+        queryset=Locale.objects.none(), widget=forms.CheckboxSelectMultiple, required=False
     )
-    include_subtree = forms.BooleanField(required=False)
+    update_subtree = forms.BooleanField(label=__("Include subtree"), required=False, help_text=__("Existing pages will be updated, no new pages will be created."))
+
+    create_locales = forms.ModelMultipleChoiceField(
+        label=__("Create new translations"),
+        queryset=Locale.objects.none(), widget=forms.CheckboxSelectMultiple, required=False
+    )
+    create_subtree = forms.BooleanField(label=__("Include subtree"), required=False, help_text=__("All child pages will be created."))
 
     def __init__(self, instance, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        locales = Locale.objects.exclude(id=instance.locale_id)
+        active_locales_q = Q(id__in=Translation.objects.filter(object_id=instance.translation_key, enabled=True).values_list('target_locale_id', flat=True))
+        self.fields["update_locales"].queryset = locales.filter(active_locales_q)
+        self.fields["create_locales"].queryset = locales.exclude(active_locales_q)
+
         if isinstance(instance, Page):
-            page_descendant_count = instance.get_descendants().count()
+            has_descendants = instance.get_descendants().exists()
         else:
-            page_descendant_count = 0
+            has_descendants = False
 
-        if page_descendant_count > 0:
-            self.fields[
-                "include_subtree"
-            ].help_text = "This will add {} additional pages to the request".format(
-                page_descendant_count
-            )
-        else:
-            self.fields["include_subtree"].widget = forms.HiddenInput()
+        if not has_descendants:
+            self.fields["update_subtree"].widget = forms.HiddenInput()
+            self.fields["create_subtree"].widget = forms.HiddenInput()
 
-        self.fields["locales"].queryset = Locale.objects.exclude(
-            id=instance.locale_id
-        )
+        if not self.fields["update_locales"].queryset.exists():
+            self.fields["update_locales"].widget = forms.HiddenInput()
+            self.fields["update_subtree"].widget = forms.HiddenInput()
+
+        if not self.fields["create_locales"].queryset.exists():
+            self.fields["create_locales"].widget = forms.HiddenInput()
+            self.fields["create_subtree"].widget = forms.HiddenInput()
 
 
 class TranslationCreator:
@@ -51,19 +64,23 @@ class TranslationCreator:
     This class will track the objects that have already submitted so an object doesn't
     get submitted twice.
     """
-    def __init__(self, user, target_locales):
+    def __init__(self, user, update_locales, create_locales):
         self.user = user
-        self.target_locales = target_locales
-        self.seen_objects = set()
+        self.update_locales = update_locales
+        self.create_locales = create_locales
+        self.updated_objects = set()
+        self.created_objects = set()
 
-    def create_translations(self, instance, include_related_objects=True):
+    def update_translations(self, instance, include_related_objects=True):
+        if not self.update_locales:
+            return
+
         if isinstance(instance, Page):
-            # TODO: Find a way to handle non-page models with MTI
             instance = instance.specific
 
-        if instance.translation_key in self.seen_objects:
+        if instance.translation_key in self.updated_objects:
             return
-        self.seen_objects.add(instance.translation_key)
+        self.updated_objects.add(instance.translation_key)
 
         source, created = TranslationSource.from_instance(instance)
 
@@ -78,19 +95,59 @@ class TranslationCreator:
                 related_instance = related_object_segment.object.get_instance(instance.locale)
 
                 # Limit to one level of related objects, since this could potentially pull in a lot of stuff
-                _create_translations(related_instance, include_related_objects=False)
+                self.update_translations(related_instance, include_related_objects=False)
 
         # Set up translation records
-        for target_locale in self.target_locales:
-            # Create/update translation
-            translation, created = Translation.objects.update_or_create(
-                object=source.object,
-                target_locale=target_locale,
-                defaults={
-                    'source': source,
-                }
-            )
-            translation.update(user=self.user)
+        for target_locale in self.update_locales:
+            # Update translation if it exists
+            try:
+                translation = Translation.objects.get(object=source.object, target_locale=target_locale)
+
+                if translation.source != source:
+                    translation.source = source
+                    translation.source_last_updated_at = timezone.now()
+                    translation.save(update_fields=['source', 'source_last_updated_at'])
+                    translation.save_target(user=self.user)
+
+            except Translation.DoesNotExist:
+                continue
+
+    def create_translations(self, instance, include_related_objects=True):
+        if not self.create_locales:
+            return
+
+        if isinstance(instance, Page):
+            instance = instance.specific
+
+        if instance.translation_key in self.created_objects:
+            return
+        self.created_objects.add(instance.translation_key)
+
+        source, created = TranslationSource.from_instance(instance)
+
+        if created:
+            source.extract_segments()
+
+        # Add related objects
+        # Must be before translation records or those translation records won't be able to create
+        # the objects because the dependencies haven't been created
+        if include_related_objects:
+            for related_object_segment in source.relatedobjectsegment_set.all():
+                related_instance = related_object_segment.object.get_instance(instance.locale)
+
+                # Limit to one level of related objects, since this could potentially pull in a lot of stuff
+                self.create_translations(related_instance, include_related_objects=False)
+
+        # Set up translation records
+        for target_locale in self.create_locales:
+            # Create or update translation
+            translation, created = Translation.objects.get_or_create(object=source.object, target_locale=target_locale, defaults={'source': source})
+
+            if created or translation.source != source:
+                translation.source = source
+                translation.source_last_updated_at = timezone.now()
+                translation.save(update_fields=['source', 'source_last_updated_at'])
+                translation.save_target(user=self.user)
 
 
 def submit_page_translation(request, page_id):
@@ -105,30 +162,28 @@ def submit_page_translation(request, page_id):
 
         if form.is_valid():
             with transaction.atomic():
-                translator = TranslationCreator(request.user, form.cleaned_data["locales"])
+                translator = TranslationCreator(request.user, form.cleaned_data["update_locales"], form.cleaned_data["create_locales"])
                 translator.create_translations(page)
+                translator.update_translations(page)
 
                 # Now add the sub tree
-                if form.cleaned_data["include_subtree"]:
+                if form.cleaned_data["update_subtree"] or form.cleaned_data["create_subtree"]:
                     def _walk(current_page):
                         for child_page in current_page.get_children():
-                            translator.create_translations(child_page)
+                            if form.cleaned_data["update_subtree"] :
+                                translator.update_translations(child_page)
+
+                            if form.cleaned_data["create_subtree"]:
+                                translator.create_translations(child_page)
 
                             if child_page.numchild:
                                 _walk(child_page)
 
                     _walk(page)
 
-                if len(form.cleaned_data["locales"]) == 1:
-                    locales = form.cleaned_data["locales"][0].get_display_name()
-
-                else:
-                    # Note: always plural
-                    locales = _('{} locales').format(len(form.cleaned_data["locales"]))
-
                 # TODO: Button that links to page in translations report when we have it
                 messages.success(
-                    request, _("The page '{}' was successfully submitted for translation into {}").format(page.title, locales)
+                    request, _("The page '{}' was successfully submitted for translation").format(page.title)
                 )
 
                 if next_url:
@@ -162,18 +217,12 @@ def submit_snippet_translation(request, app_label, model_name, pk):
 
         if form.is_valid():
             with transaction.atomic():
-                translator = TranslationCreator(request.user, form.cleaned_data["locales"])
+                translator = TranslationCreator(request.user, form.cleaned_data["update_locales"], form.cleaned_data["create_locales"])
                 translator.create_translations(instance)
-
-                if len(form.cleaned_data["locales"]) == 1:
-                    locales = form.cleaned_data["locales"][0].get_display_name()
-                else:
-                    # Note: always plural
-                    locales = _('{} locales').format(len(form.cleaned_data["locales"]))
 
                 # TODO: Button that links to snippet in translations report when we have it
                 messages.success(
-                    request, _("The {} '{}' was successfully submitted for translation into {}").format(model._meta.verbose_name.title(), (str(instance)), locales)
+                    request, _("The {} '{}' was successfully submitted for translation").format(model._meta.verbose_name.title(), (str(instance)))
                 )
 
                 if next_url:
